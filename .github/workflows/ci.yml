@@ -31,7 +31,10 @@ jobs:
           git diff --exit-code go.mod go.sum || (echo "go.mod/go.sum no están actualizados, ejecuta 'go mod tidy'" && exit 1)
 
       - name: Ejecutar tests con cobertura
-        run: go test ./... -coverprofile=coverage.out -covermode=atomic -coverpkg=./... -v
+        run: |
+          # Excluye el paquete db (código generado por sqlc) y cmd/server del cómputo
+          PKGS=$(go list ./... | grep -v 'internal/db' | grep -v 'cmd/server' | tr '\n' ',')
+          go test ./... -coverprofile=coverage.out -covermode=atomic -coverpkg=${PKGS%,} -v
 
       - name: Verificar cobertura mínima (≥60%)
         run: |

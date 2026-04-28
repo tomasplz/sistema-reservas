@@ -23,13 +23,14 @@ func main() {
 	port := getenv("PORT", "8080")
 	dbPath := getenv("DB_PATH", "data.db")
 	secret := getenv("APP_SECRET", "clave-super-secreta")
+	https := getenv("HTTPS", "false") == "true"
 
-	if err := runServer(port, dbPath, secret); err != nil {
+	if err := runServer(port, dbPath, secret, https); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
 }
 
-func runServer(port, dbPath, secret string) error {
+func runServer(port, dbPath, secret string, secureCookies bool) error {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil && filepath.Dir(dbPath) != "." {
 		return err
 	}
@@ -52,6 +53,13 @@ func runServer(port, dbPath, secret string) error {
 	}
 
 	sessionStore := sessions.NewCookieStore([]byte(secret))
+	sessionStore.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   86400 * 7, // 7 días
+		HttpOnly: true,
+		Secure:   secureCookies, // true en producción con HTTPS
+		SameSite: http.SameSiteLaxMode,
+	}
 	authService := auth.NewAuth(store, sessionStore)
 	h := handler.NewHandler(store, authService, renderer)
 
