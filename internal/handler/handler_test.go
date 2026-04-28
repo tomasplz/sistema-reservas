@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -23,11 +24,11 @@ import (
 	"proyecto-monolito/internal/template"
 )
 
+// ─── Setup ──────────────────────────────────────────────────────────────────
+
 func setupTestServer(t *testing.T) (*httptest.Server, *sessions.CookieStore, *store.SQLStore) {
 	t.Helper()
 
-	// Cada test usa una base de datos en memoria única con URI distinto
-	// para evitar que tests paralelos compartan estado.
 	dbConn, err := sql.Open("sqlite", "file::memory:?cache=shared&mode=memory")
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +42,6 @@ func setupTestServer(t *testing.T) (*httptest.Server, *sessions.CookieStore, *st
 
 	appStore := store.NewStore(dbConn)
 	sessionStore := sessions.NewCookieStore([]byte("test-secret"))
-	// Necesario para que gorilla/sessions no exija HTTPS en tests
 	sessionStore.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   86400,
@@ -80,9 +80,8 @@ func setupTestServer(t *testing.T) (*httptest.Server, *sessions.CookieStore, *st
 	return httptest.NewServer(r), sessionStore, appStore
 }
 
-// newTestClient crea un http.Client con cookie jar que sigue redirects
-// pero para en el primer redirect de tipo 303 en requests de formulario.
-func newTestClient(t *testing.T) *http.Client {
+// newClient crea un http.Client con cookie jar que sigue redirects
+func newClient(t *testing.T) *http.Client {
 	t.Helper()
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -91,69 +90,84 @@ func newTestClient(t *testing.T) *http.Client {
 	return &http.Client{Jar: jar}
 }
 
+// loginUser registra y loguea un usuario, devuelve el client autenticado
+func loginUser(t *testing.T, serverURL, email, password string, appStore *store.SQLStore) *http.Client {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := appStore.CreateUser(context.Background(), email, string(hash)); err != nil {
+		t.Fatal(err)
+	}
+	client := newClient(t)
+	resp, err := client.PostForm(serverURL+"/login", url.Values{
+		"email":    {email},
+		"password": {password},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login falló: status %d en %s", resp.StatusCode, resp.Request.URL)
+	}
+	return client
+}
+
+// createSpace crea un espacio vía POST y devuelve su ID consultando el store
+func createSpace(t *testing.T, client *http.Client, serverURL string, appStore *store.SQLStore, userEmail string) string {
+	t.Helper()
+	resp, err := client.PostForm(serverURL+"/espacios", url.Values{
+		"nombre":               {"Sala Test"},
+		"tipo":                 {"Reunión"},
+		"hora_apertura":        {"08:00"},
+		"hora_cierre":          {"18:00"},
+		"duracion_min_minutos": {"60"},
+		"precio_hora":          {"100"},
+		"recargo_fin_semana":   {"0.20"},
+		"descuento_volumen":    {"0.10"},
+		"horas_para_descuento": {"4"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Obtener el usuario para buscar su espacio
+	user, err := appStore.GetUserByEmail(context.Background(), userEmail)
+	if err != nil {
+		t.Fatalf("GetUserByEmail: %v", err)
+	}
+	spaces, err := appStore.ListSpacesByUser(context.Background(), user.ID)
+	if err != nil || len(spaces) == 0 {
+		t.Fatalf("no se encontró espacio para usuario %s: %v", userEmail, err)
+	}
+	return fmt.Sprintf("%d", spaces[0].ID)
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
 func TestLoginAndCreateSpace(t *testing.T) {
 	server, _, appStore := setupTestServer(t)
 	defer server.Close()
 
-	// Crear usuario directamente en la base de datos del test
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte("secret123"), bcrypt.DefaultCost)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := appStore.CreateUser(context.Background(), "user@example.com", string(passwordHash)); err != nil {
-		t.Fatal(err)
+	client := loginUser(t, server.URL, "user@example.com", "secret123", appStore)
+
+	spaceID := createSpace(t, client, server.URL, appStore, "user@example.com")
+	if spaceID == "" {
+		t.Fatal("no se obtuvo ID del espacio creado")
 	}
 
-	client := newTestClient(t)
-
-	// --- Login ---
-	loginForm := url.Values{}
-	loginForm.Set("email", "user@example.com")
-	loginForm.Set("password", "secret123")
-
-	resp, err := client.PostForm(server.URL+"/login", loginForm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-
-	// Después de seguir el redirect, debe estar en /espacios (200)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("esperaba 200 tras login+redirect, obtuve %d (URL final: %s)", resp.StatusCode, resp.Request.URL)
-	}
-
-	// --- Crear espacio ---
-	spaceForm := url.Values{}
-	spaceForm.Set("nombre", "Sala A")
-	spaceForm.Set("tipo", "Reunión")
-	spaceForm.Set("hora_apertura", "08:00")
-	spaceForm.Set("hora_cierre", "18:00")
-	spaceForm.Set("duracion_min_minutos", "60")
-	spaceForm.Set("precio_hora", "75")
-	spaceForm.Set("recargo_fin_semana", "0.20")
-	spaceForm.Set("descuento_volumen", "0.10")
-	spaceForm.Set("horas_para_descuento", "4")
-
-	resp, err = client.PostForm(server.URL+"/espacios", spaceForm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("esperaba 200 tras crear espacio+redirect, obtuve %d", resp.StatusCode)
-	}
-
-	// --- Verificar que el espacio aparece en el listado ---
-	resp, err = client.Get(server.URL + "/espacios")
+	resp, err := client.Get(server.URL + "/espacios")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if !strings.Contains(string(body), "Sala A") {
-		t.Fatalf("esperaba 'Sala A' en el listado, obtenido:\n%s", string(body))
+	if !strings.Contains(string(body), "Sala Test") {
+		t.Fatalf("esperaba 'Sala Test' en la lista, body:\n%s", string(body)[:min(len(string(body)), 500)])
 	}
 }
 
@@ -161,34 +175,27 @@ func TestRegisterAndLogin(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	defer server.Close()
 
-	client := newTestClient(t)
-
-	// --- Registro ---
-	regForm := url.Values{}
-	regForm.Set("email", "nuevo@example.com")
-	regForm.Set("password", "mipassword")
-
-	resp, err := client.PostForm(server.URL+"/registro", regForm)
+	client := newClient(t)
+	resp, err := client.PostForm(server.URL+"/registro", url.Values{
+		"email":    {"nuevo@example.com"},
+		"password": {"mipassword"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("esperaba 200 tras registro, obtuve %d", resp.StatusCode)
 	}
 
-	// --- Login con las mismas credenciales ---
-	loginForm := url.Values{}
-	loginForm.Set("email", "nuevo@example.com")
-	loginForm.Set("password", "mipassword")
-
-	resp, err = client.PostForm(server.URL+"/login", loginForm)
+	resp, err = client.PostForm(server.URL+"/login", url.Values{
+		"email":    {"nuevo@example.com"},
+		"password": {"mipassword"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("esperaba 200 tras login, obtuve %d", resp.StatusCode)
 	}
@@ -198,17 +205,241 @@ func TestRequireAuthRedirects(t *testing.T) {
 	server, _, _ := setupTestServer(t)
 	defer server.Close()
 
-	// Sin cookie de sesión, acceder a /espacios debe redirigir a /login
-	client := newTestClient(t)
-
+	client := newClient(t)
 	resp, err := client.Get(server.URL + "/espacios")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-
-	// Después de seguir el redirect, debería estar en /login
 	if !strings.Contains(resp.Request.URL.Path, "login") {
-		t.Fatalf("esperaba redirigir a /login, URL final: %s", resp.Request.URL)
+		t.Fatalf("esperaba redirect a /login, URL final: %s", resp.Request.URL)
 	}
+}
+
+func TestLoginInvalidCredentials(t *testing.T) {
+	server, _, appStore := setupTestServer(t)
+	defer server.Close()
+
+	hash, _ := bcrypt.GenerateFromPassword([]byte("correctpass"), bcrypt.DefaultCost)
+	appStore.CreateUser(context.Background(), "u@example.com", string(hash))
+
+	client := newClient(t)
+	// Contraseña incorrecta
+	resp, err := client.PostForm(server.URL+"/login", url.Values{
+		"email":    {"u@example.com"},
+		"password": {"wrongpass"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "nv") { // "inválidas"
+		t.Error("esperaba mensaje de error de credenciales")
+	}
+}
+
+func TestGetForms(t *testing.T) {
+	server, _, _ := setupTestServer(t)
+	defer server.Close()
+
+	client := newClient(t)
+
+	for _, path := range []string{"/login", "/registro"} {
+		resp, err := client.Get(server.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s: esperaba 200, obtuve %d", path, resp.StatusCode)
+		}
+		if !strings.Contains(string(body), "ReservaEspacios") {
+			t.Errorf("GET %s: esperaba contenido HTML", path)
+		}
+	}
+}
+
+func TestNewSpaceForm(t *testing.T) {
+	server, _, appStore := setupTestServer(t)
+	defer server.Close()
+
+	client := loginUser(t, server.URL, "u@example.com", "pass123", appStore)
+
+	resp, err := client.Get(server.URL + "/espacios/nuevo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("esperaba 200, obtuve %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "espacio") {
+		t.Error("esperaba formulario de nuevo espacio")
+	}
+}
+
+func TestSpaceDetail(t *testing.T) {
+	server, _, appStore := setupTestServer(t)
+	defer server.Close()
+
+	client := loginUser(t, server.URL, "u2@example.com", "pass123", appStore)
+	spaceID := createSpace(t, client, server.URL, appStore, "u2@example.com")
+
+	resp, err := client.Get(server.URL + "/espacios/" + spaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("esperaba 200, obtuve %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "Sala Test") {
+		t.Error("esperaba nombre del espacio en el detalle")
+	}
+}
+
+func TestEditSpaceFormAndUpdate(t *testing.T) {
+	server, _, appStore := setupTestServer(t)
+	defer server.Close()
+
+	client := loginUser(t, server.URL, "u3@example.com", "pass123", appStore)
+	spaceID := createSpace(t, client, server.URL, appStore, "u3@example.com")
+
+	// GET formulario de edición
+	resp, err := client.Get(server.URL + "/espacios/" + spaceID + "/editar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET editar: esperaba 200, obtuve %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "Sala Test") {
+		t.Error("esperaba nombre del espacio en el formulario de edición")
+	}
+
+	// POST actualización
+	resp, err = client.PostForm(server.URL+"/espacios/"+spaceID+"/editar", url.Values{
+		"nombre":               {"Sala Actualizada"},
+		"tipo":                 {"Oficina"},
+		"hora_apertura":        {"09:00"},
+		"hora_cierre":          {"19:00"},
+		"duracion_min_minutos": {"60"},
+		"precio_hora":          {"120"},
+		"recargo_fin_semana":   {"0.15"},
+		"descuento_volumen":    {"0.05"},
+		"horas_para_descuento": {"3"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "Sala Actualizada") {
+		t.Errorf("esperaba 'Sala Actualizada' en respuesta, body: %s", string(body)[:min(len(string(body)), 300)])
+	}
+}
+
+func TestCreateReserva(t *testing.T) {
+	server, _, appStore := setupTestServer(t)
+	defer server.Close()
+
+	client := loginUser(t, server.URL, "u4@example.com", "pass123", appStore)
+	spaceID := createSpace(t, client, server.URL, appStore, "u4@example.com")
+
+	resp, err := client.PostForm(server.URL+"/espacios/"+spaceID+"/reservas", url.Values{
+		"fecha":       {"2026-06-15"},
+		"hora_inicio": {"10:00"},
+		"hora_fin":    {"12:00"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	// Debe mostrar el detalle con la reserva o mensaje de éxito
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("esperaba 200, obtuve %d", resp.StatusCode)
+	}
+	_ = body
+}
+
+func TestAvailabilityAPI(t *testing.T) {
+	server, _, appStore := setupTestServer(t)
+	defer server.Close()
+
+	client := loginUser(t, server.URL, "u5@example.com", "pass123", appStore)
+	spaceID := createSpace(t, client, server.URL, appStore, "u5@example.com")
+
+	apiURL := fmt.Sprintf("%s/api/reservas/disponibilidad?espacio_id=%s&fecha=2026-07-01&hora_inicio=10:00&hora_fin=12:00", server.URL, spaceID)
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("availability API: esperaba 200, obtuve %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "available") {
+		t.Errorf("esperaba campo 'available' en JSON, body: %s", string(body))
+	}
+}
+
+func TestPriceAPI(t *testing.T) {
+	server, _, appStore := setupTestServer(t)
+	defer server.Close()
+
+	client := loginUser(t, server.URL, "u6@example.com", "pass123", appStore)
+	spaceID := createSpace(t, client, server.URL, appStore, "u6@example.com")
+
+	apiURL := fmt.Sprintf("%s/api/reservas/precio?espacio_id=%s&fecha=2026-07-01&hora_inicio=10:00&hora_fin=12:00", server.URL, spaceID)
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("price API: esperaba 200, obtuve %d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "price") {
+		t.Errorf("esperaba campo 'price' en JSON, body: %s", string(body))
+	}
+}
+
+func TestLogout(t *testing.T) {
+	server, _, appStore := setupTestServer(t)
+	defer server.Close()
+
+	client := loginUser(t, server.URL, "u7@example.com", "pass123", appStore)
+
+	// Logout
+	resp, err := client.PostForm(server.URL+"/logout", url.Values{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Tras logout, /espacios debe redirigir a /login
+	resp, err = client.Get(server.URL + "/espacios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !strings.Contains(resp.Request.URL.Path, "login") {
+		t.Errorf("tras logout, esperaba redirect a /login, URL: %s", resp.Request.URL)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
