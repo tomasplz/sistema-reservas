@@ -69,8 +69,11 @@ func (h *Handler) SpaceDetail(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.Templates.Render(w, "detalle_espacio.gohtml", h.view(r, model.ViewData{
 			Title: "Detalle de espacio", Flash: flash,
-			Error:   "No se pudieron cargar las reservas",
-			Payload: struct{ Space db.Space; Reservas []db.Reserva }{Space: space},
+			Error: "No se pudieron cargar las reservas",
+			Payload: struct {
+				Space    db.Space
+				Reservas []db.Reserva
+			}{Space: space},
 		}))
 		return
 	}

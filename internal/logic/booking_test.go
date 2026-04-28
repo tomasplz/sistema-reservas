@@ -23,18 +23,18 @@ func (f fakeReservationStore) GetReservasBySpaceAndDate(ctx context.Context, esp
 
 func TestCalcularPrecio(t *testing.T) {
 	sample := db.Space{
-		PrecioHora:       100,
-		RecargoFinSemana: 0.25,
-		DescuentoVolumen: 0.20,
+		PrecioHora:         100,
+		RecargoFinSemana:   0.25,
+		DescuentoVolumen:   0.20,
 		HorasParaDescuento: 4,
 	}
 
 	cases := []struct {
-		name      string
-		fecha     string
+		name       string
+		fecha      string
 		horaInicio string
-		horaFin   string
-		expected float64
+		horaFin    string
+		expected   float64
 	}{
 		{"Dia laboral sin descuento", "2026-04-30", "10:00", "12:00", 200.00},
 		{"Fin de semana sin descuento", "2026-05-03", "10:00", "12:00", 250.00},
@@ -54,20 +54,20 @@ func TestCalcularPrecio(t *testing.T) {
 
 func TestValidarDisponibilidad(t *testing.T) {
 	espacio := db.Space{
-		ID:                  1,
-		HoraApertura:        "08:00",
-		HoraCierre:          "18:00",
-		DuracionMinMinutos:  60,
+		ID:                 1,
+		HoraApertura:       "08:00",
+		HoraCierre:         "18:00",
+		DuracionMinMinutos: 60,
 	}
 
 	store := fakeReservationStore{reservas: []db.Reserva{{EspacioID: 1, Fecha: "2026-05-01", HoraInicio: "10:00", HoraFin: "12:00"}}}
 
 	cases := []struct {
-		name      string
-		fecha     string
+		name       string
+		fecha      string
 		horaInicio string
-		horaFin   string
-		wantOK    bool
+		horaFin    string
+		wantOK     bool
 	}{
 		{"Disponible horario libre", "2026-05-01", "12:00", "13:00", true},
 		{"Fuera de horario", "2026-05-01", "07:00", "09:00", false},
