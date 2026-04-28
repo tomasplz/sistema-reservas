@@ -31,7 +31,7 @@ jobs:
           git diff --exit-code go.mod go.sum || (echo "go.mod/go.sum no están actualizados, ejecuta 'go mod tidy'" && exit 1)
 
       - name: Ejecutar tests con cobertura
-        run: go test ./... -coverprofile=coverage.out -covermode=atomic -v
+        run: go test ./... -coverprofile=coverage.out -covermode=atomic -coverpkg=./... -v
 
       - name: Verificar cobertura mínima (≥60%)
         run: |
